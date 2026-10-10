@@ -11,7 +11,7 @@
 #include "imgui_impl_opengl3.h"
 
 #define PERSPECTIVE_TYPE 0
-#define ORTOGRAPHIC_TYPE 1
+#define ORTHOGRAPHIC_TYPE 1
 
 // May conflict
 using namespace std;
@@ -87,8 +87,8 @@ void ImGuiFrame(Engine& e, int tps) {
     ImGui::Render();
 }
 
-void updateGlfwWindow(Engine& e) {
-    // Update width, height, projection.
+void updateGlfwAndGl(Engine& e) {
+    // Update width, height, projection, settings.
     glfwGetFramebufferSize(e.window, &e.sets.w, &e.sets.h);
     glViewport(0, 0, e.sets.w, e.sets.h);
     glClearColor(0.1f, 0.1f, 0.16f, 1.0f);
@@ -100,8 +100,9 @@ void updateGlfwWindow(Engine& e) {
     glLoadIdentity();
 }
 
+// More than just controls actually... treat as "Variables" or "Settings".
 struct Controls {
-    double fov;
+    double fov, nearClipPlane;
     double yaw, pitch;
     double sensX, sensY;
     double baseVel, sprintVelMultiplier;
@@ -139,37 +140,12 @@ struct Camera {
 struct Triangle {
     dvec3 v1, v2, v3;
 
-    void draw(Engine &e, Camera &cam, dvec3 col) {
-        // Relative camera positions
-        dvec3 rel1 = cam.camDimRelative(v1);
-        dvec3 rel2 = cam.camDimRelative(v2);
-        dvec3 rel3 = cam.camDimRelative(v3);
-        // If behind the camera, skip rendering
-        if (rel1.y <= 0 || rel2.y <= 0 || rel3.y <= 0) return;
-
-        glBegin(GL_TRIANGLES);
-        glColor3d(col.x, col.y, col.z);
-
-        if (cam.type == PERSPECTIVE_TYPE) {
-            double fl = cam.focalLength();
-            for (dvec3 rel : {rel1, rel2, rel3}) {
-                double invY = 1/(rel.y + fl);
-                double x = (rel.x*fl)*invY;
-                double y = (rel.z*fl)*invY;
-
-                glVertex2d(x, y);
-            }
-        } else if (cam.type == ORTOGRAPHIC_TYPE) {
-            for (dvec3 rel : {rel1, rel2, rel3}) {
-                double x = dot(rel, dvec3(1.0, 0.0, 0.0)) / cam.sensorHeight;
-                double y = dot(rel, dvec3(0.0, 0.0, 1.0)) / cam.sensorHeight;
-
-                glVertex2d(x, y);
-            }
-        } else return;
-
-        glEnd();
+    double distToCam(Camera &cam) {
+        dvec3 med = (v1+v2+v3)*0.33333333333333333333333; // avoid division at ALL cost
+        return distance(med, cam.pos);
     }
+
+    dvec3 normal() { return normalize(cross((v2-v1), (v3-v1))); }
 };
 
 struct Object {
@@ -188,6 +164,42 @@ struct Object {
                 v->y = x*s + y*c;
             }
         }
+    }
+
+    void draw(Camera& cam, dvec3 lightN) {
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LESS);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        glBegin(GL_TRIANGLES);
+
+        double fl = cam.focalLength();
+
+        for (Triangle& tri : tris) {
+            dvec3 colFinal = col*dot(tri.normal(), -lightN);
+
+            dvec3 rel1 = cam.camDimRelative(tri.v1);
+            dvec3 rel2 = cam.camDimRelative(tri.v2);
+            dvec3 rel3 = cam.camDimRelative(tri.v3);
+
+            glColor3d(colFinal.x, colFinal.y, colFinal.z);
+
+            if (cam.type == PERSPECTIVE_TYPE) {
+                for (dvec3 rel : {rel1, rel2, rel3}) {
+                    dvec3 m = rel * fl;
+                    glVertex4d(m.x, m.z, cam.controls.nearClipPlane, m.y);
+                }
+            } else if (cam.type == ORTHOGRAPHIC_TYPE) {
+                for (dvec3 rel : {rel1, rel2, rel3}) {
+                    double x = dot(rel, dvec3(1.0, 0.0, 0.0)) / cam.sensorHeight;
+                    double z = dot(rel, dvec3(0.0, 0.0, 1.0)) / cam.sensorHeight;
+
+                    glVertex3d(x, z, rel.y);
+                }
+            } else return;
+        }
+
+        glEnd();
     }
 };
 
@@ -218,11 +230,12 @@ int main() {
 
     // Controls
     Controls controls = {
-        radians(80.0),
+        radians(80.0), 0.1,
         0.0, 0.0,
-        5.0, 5.0,
+        3.0, 3.0,
         2.0, 30.0
     };
+
     // Camera
     Camera camera = {
         {0.0, -3.0, 0.0},
@@ -230,22 +243,63 @@ int main() {
         1.0, controls,
         PERSPECTIVE_TYPE
     };
+
     // A crystal
-    Object crystal = {  {
-            {{-0.5, -0.5, 0.0}, {-0.5, 0.5, 0.0}, {0.0, 0.0, -1.5}},
-            {{-0.5, 0.5, 0.0}, {0.5, 0.5, 0.0}, {0.0, 0.0, -1.5}},
-            {{0.5, 0.5, 0.0}, {0.5, -0.5, 0.0}, {0.0, 0.0, -1.5}},
-            {{0.5, -0.5, 0.0}, {-0.5, -0.5, 0.0}, {0.0, 0.0, -1.5}},
-            {{-0.5, -0.5, 0.0}, {-0.5, 0.5, 0.0}, {0.0, 0.0, 1.5}},
-            {{-0.5, 0.5, 0.0}, {0.5, 0.5, 0.0}, {0.0, 0.0, 1.5}},
-            {{0.5, 0.5, 0.0}, {0.5, -0.5, 0.0}, {0.0, 0.0, 1.5}},
-            {{0.5, -0.5, 0.0}, {-0.5, -0.5, 0.0}, {0.0, 0.0, 1.5}},
-        }, 
+    Object crystal = { {
+            // Lower faces
+            {{-0.5, -0.5, 0.0}, {-0.5,  0.5, 0.0}, { 0.0, 0.0, -1.5}},
+            {{-0.5,  0.5, 0.0}, { 0.5,  0.5, 0.0}, { 0.0, 0.0, -1.5}},
+            {{ 0.5,  0.5, 0.0}, { 0.5, -0.5, 0.0}, { 0.0, 0.0, -1.5}},
+            {{ 0.5, -0.5, 0.0}, {-0.5, -0.5, 0.0}, { 0.0, 0.0, -1.5}},
+
+            // Upper faces
+            {{ 0.0, 0.0,  1.5}, {-0.5,  0.5, 0.0}, {-0.5, -0.5, 0.0}},
+            {{ 0.0, 0.0,  1.5}, { 0.5,  0.5, 0.0}, {-0.5,  0.5, 0.0}},
+            {{ 0.0, 0.0,  1.5}, { 0.5, -0.5, 0.0}, { 0.5,  0.5, 0.0}},
+            {{ 0.0, 0.0,  1.5}, {-0.5, -0.5, 0.0}, { 0.5, -0.5, 0.0}},
+        },
+        {0.6, 0.84, 0.8},
+    };
+
+    // A sphere
+    int segments = 8;
+    double invSegs = 1.0/((double)segments);
+    int quadsPerSide = segments * segments;
+    int sphereQuadsCount = 12 * quadsPerSide;
+    vector<Triangle> sphereTris(sphereQuadsCount);
+    for (int i = 0; i < quadsPerSide; i++) {
+        int x = i % segments;
+        int y = i * invSegs;
+
+        double posX = 2.0*(double)x * invSegs - 1.0;
+        double posY = 2.0*(double)y * invSegs - 1.0;
+        double posX1 = posX + 2.0*invSegs;
+        double posY1 = posY + 2.0*invSegs;
+
+        int t = i * 12;
+        sphereTris[t + 0] = {normalize(dvec3(posX, -1, posY)), normalize(dvec3(posX1, -1, posY)), normalize(dvec3(posX1, -1, posY1))};
+        sphereTris[t + 1] = {normalize(dvec3(posX, -1, posY)), normalize(dvec3(posX1, -1, posY1)), normalize(dvec3(posX, -1, posY1))};
+        sphereTris[t + 2] = {normalize(dvec3(posX, 1, posY)), normalize(dvec3(posX, 1, posY1)), normalize(dvec3(posX1, 1, posY1))};
+        sphereTris[t + 3] = {normalize(dvec3(posX, 1, posY)), normalize(dvec3(posX1, 1, posY1)), normalize(dvec3(posX1, 1, posY))};
+        sphereTris[t + 4] = {normalize(dvec3(posX, posY, -1)), normalize(dvec3(posX, posY1, -1)), normalize(dvec3(posX1, posY1, -1))};
+        sphereTris[t + 5] = {normalize(dvec3(posX, posY, -1)), normalize(dvec3(posX1, posY1, -1)), normalize(dvec3(posX1, posY, -1))};
+        sphereTris[t + 6] = {normalize(dvec3(posX, posY, 1)), normalize(dvec3(posX1, posY, 1)), normalize(dvec3(posX1, posY1, 1))};
+        sphereTris[t + 7] = {normalize(dvec3(posX, posY, 1)), normalize(dvec3(posX1, posY1, 1)), normalize(dvec3(posX, posY1, 1))};
+        sphereTris[t + 8] = {normalize(dvec3(-1, posX, posY)), normalize(dvec3(-1, posX, posY1)), normalize(dvec3(-1, posX1, posY1))};
+        sphereTris[t + 9] = {normalize(dvec3(-1, posX, posY)), normalize(dvec3(-1, posX1, posY1)), normalize(dvec3(-1, posX1, posY))};
+        sphereTris[t + 10] = {normalize(dvec3(1, posX, posY)), normalize(dvec3(1, posX1, posY)), normalize(dvec3(1, posX1, posY1))};
+        sphereTris[t + 11] = {normalize(dvec3(1, posX, posY)), normalize(dvec3(1, posX1, posY1)), normalize(dvec3(1, posX, posY1))};
+    }
+
+    Object sphere = {
+        sphereTris,
         {0.6, 0.84, 0.8}
     };
+
     // Objects
     vector<Object> objects = {
-        crystal
+        // crystal,
+        sphere
     };
 
     int ticks = 0, tps = 0;
@@ -276,11 +330,13 @@ int main() {
             ticks = 0;
         }
 
+        dvec3 lightN = normalize(dvec3(-1.0, -1.0, -1.0));
+
         if (!engine.sets.capFps || renderTimer >= 1.0) {
             // Subtract back the renderTimer
             if (engine.sets.capFps) renderTimer -= 1.0;
             // Update window stuff & render
-            updateGlfwWindow(engine);
+            updateGlfwAndGl(engine);
             glfwPollEvents();
             ImGuiFrame(engine, tps);
 
@@ -288,13 +344,7 @@ int main() {
             for (Object obj : objects) {
                 // Spin, because we can.
                 obj.spin(currentT);
-                for (Triangle tri : obj.tris) {
-                    double colVariety = 0.25;
-                    double random1 = (double)(rand()%1000000)*0.000001; // [0, 1)
-                    double random2 = random1*colVariety;
-                    double randomFinal = random2-random2*0.5;
-                    tri.draw(engine, camera, obj.col+randomFinal);
-                }
+                obj.draw(camera, lightN);
             }
 
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
