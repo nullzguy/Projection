@@ -9,6 +9,10 @@
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
+// tinyObjLoader from:
+// https://github.com/tinyobjloader/tinyobjloader
+#define TINYOBJLOADER_IMPLEMENTATION
+#include "tiny_obj_loader.h"
 
 #define PERSPECTIVE_TYPE 0
 #define ORTHOGRAPHIC_TYPE 1
@@ -92,7 +96,8 @@ void updateGlfwAndGl(Engine& e) {
     glfwGetFramebufferSize(e.window, &e.sets.w, &e.sets.h);
     glViewport(0, 0, e.sets.w, e.sets.h);
     glClearColor(0.1f, 0.1f, 0.16f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     glOrtho(-e.sets.aspect(), e.sets.aspect(), -1.0, 1.0, -1.0, 1.0);
@@ -104,6 +109,8 @@ void updateGlfwAndGl(Engine& e) {
 struct Controls {
     double fov, nearClipPlane;
     double yaw, pitch;
+    bool useCursor;
+    double xMPos, yMPos;
     double sensX, sensY;
     double baseVel, sprintVelMultiplier;
 };
@@ -139,67 +146,51 @@ struct Camera {
 
 struct Triangle {
     dvec3 v1, v2, v3;
+};
 
-    double distToCam(Camera &cam) {
-        dvec3 med = (v1+v2+v3)*0.33333333333333333333333; // avoid division at ALL cost
-        return distance(med, cam.pos);
-    }
-
-    dvec3 normal() { return normalize(cross((v2-v1), (v3-v1))); }
+struct Face {
+    vector<dvec3> v;
+    dvec3 n;
 };
 
 struct Object {
-    vector<Triangle> tris;
+    vector<Face> faces;
     dvec3 col;
 
-    // Reminds me of that one rick&morty spinning bike scene
-    void spin(double time) {
-        double s = sin(time);
-        double c = cos(time);
-        for (Triangle& tri : tris) {
-            for (dvec3* v : {&tri.v1, &tri.v2, &tri.v3}) {
-                double x = v->x;
-                double y = v->y;
-                v->x = x*c - y*s;
-                v->y = x*s + y*c;
-            }
-        }
-    }
-
     void draw(Camera& cam, dvec3 lightN) {
-        glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_LESS);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        glBegin(GL_TRIANGLES);
 
         double fl = cam.focalLength();
 
-        for (Triangle& tri : tris) {
-            dvec3 colFinal = col*dot(tri.normal(), -lightN);
+        for (Face& face : faces) {
+            glBegin(GL_POLYGON);
 
-            dvec3 rel1 = cam.camDimRelative(tri.v1);
-            dvec3 rel2 = cam.camDimRelative(tri.v2);
-            dvec3 rel3 = cam.camDimRelative(tri.v3);
+            dvec3 colFinal = col*dot(face.n, -lightN);
+            size_t vcount = face.v.size();
+
+            vector<dvec3> rels(vcount);
+            for (int i = 0; i < vcount; i++) {
+                rels[i] = cam.camDimRelative(face.v[i]);
+            }
 
             glColor3d(colFinal.x, colFinal.y, colFinal.z);
 
             if (cam.type == PERSPECTIVE_TYPE) {
-                for (dvec3 rel : {rel1, rel2, rel3}) {
+                for (dvec3 rel : rels) {
                     dvec3 m = rel * fl;
                     glVertex4d(m.x, m.z, cam.controls.nearClipPlane, m.y);
                 }
             } else if (cam.type == ORTHOGRAPHIC_TYPE) {
-                for (dvec3 rel : {rel1, rel2, rel3}) {
+                for (dvec3 rel : rels) {
                     double x = dot(rel, dvec3(1.0, 0.0, 0.0)) / cam.sensorHeight;
                     double z = dot(rel, dvec3(0.0, 0.0, 1.0)) / cam.sensorHeight;
 
                     glVertex3d(x, z, rel.y);
                 }
-            } else return;
+            }
+            
+            glEnd();
         }
-
-        glEnd();
     }
 };
 
@@ -217,9 +208,93 @@ void doControls(Engine& e, Camera& cam, double dt) {
     if (glfwGetKey(e.window, GLFW_KEY_DOWN) == GLFW_PRESS) cam.controls.pitch -= cam.controls.sensY*dt;
     if (glfwGetKey(e.window, GLFW_KEY_UP) == GLFW_PRESS) cam.controls.pitch += cam.controls.sensY*dt;
 
+    static bool qWasDown = false;
+    static bool firstMouseFrame = true;
+    bool qIsDown = glfwGetKey(e.window, GLFW_KEY_TAB) == GLFW_PRESS;
+    if (qIsDown && !qWasDown) {
+        cam.controls.useCursor = !cam.controls.useCursor;
+        firstMouseFrame = true;
+    }
+    qWasDown = qIsDown;
+
+    static bool lastUseCursor = false;
+    if (cam.controls.useCursor != lastUseCursor) {
+        glfwSetInputMode(e.window, GLFW_CURSOR, cam.controls.useCursor ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+        if (cam.controls.useCursor && glfwRawMouseMotionSupported()) glfwSetInputMode(e.window, GLFW_RAW_MOUSE_MOTION, GLFW_TRUE);
+        else glfwSetInputMode(e.window, GLFW_RAW_MOUSE_MOTION, GLFW_FALSE);
+        lastUseCursor = cam.controls.useCursor;
+    }
+
+    if (cam.controls.useCursor) {
+        double oldXMPos = cam.controls.xMPos;
+        double oldYMPos = cam.controls.yMPos;
+        glfwGetCursorPos(e.window, &cam.controls.xMPos, &cam.controls.yMPos);
+
+        if (firstMouseFrame) {
+            firstMouseFrame = false;
+        } else {
+            cam.controls.yaw += cam.controls.sensX * (cam.controls.xMPos - oldXMPos) * 0.01;
+            cam.controls.pitch -= cam.controls.sensY * (cam.controls.yMPos - oldYMPos) * 0.01;
+        }
+    }
+
     if (cam.controls.pitch > M_PI*0.4999) cam.controls.pitch = M_PI*0.4999;
     if (cam.controls.pitch < -M_PI*0.4999) cam.controls.pitch = -M_PI*0.4999;
 }
+
+vector<Object> loadObj(const string& path) {
+    // Thanks to:
+    // https://github.com/tinyobjloader/tinyobjloader
+
+    std::string inputfile = path;
+    tinyobj::attrib_t attrib;
+    std::vector<tinyobj::shape_t> shapes;
+    std::string warn;
+    std::string err;
+
+    bool ret = tinyobj::LoadObj(&attrib, &shapes, nullptr, &warn, &err, inputfile.c_str());
+    
+    if (!warn.empty()) std::cout << warn << std::endl;
+    if (!err.empty()) std::cerr << err << std::endl;
+    if (!ret) exit(1);
+
+    vector<Object> out(shapes.size());
+
+    for (size_t s = 0; s < shapes.size(); ++s) {
+        const auto& mesh = shapes[s].mesh;
+        out[s].faces.resize(mesh.num_face_vertices.size());
+        out[s].col = {0.45, 0.45, 0.55};
+
+        size_t index_offset = 0;
+
+        for (size_t f = 0; f < mesh.num_face_vertices.size(); ++f) {
+            const size_t fv = mesh.num_face_vertices[f];
+            Face& face = out[s].faces[f];
+            face.v.resize(fv);
+
+            for (size_t v = 0; v < fv; ++v) {
+                const tinyobj::index_t idx = mesh.indices[index_offset + v];
+                const size_t p = 3 * idx.vertex_index;
+
+                face.v[v] = dvec3(
+                    attrib.vertices[p + 0],
+                    attrib.vertices[p + 2],
+                    attrib.vertices[p + 1]
+                );
+            }
+
+            if (fv >= 3) {
+                face.n = normalize(cross(
+                    face.v[1] - face.v[0],
+                    face.v[2] - face.v[0]
+                ));
+            } else face.n = dvec3(0.0);
+
+            index_offset += fv;
+        }
+    }
+    return out;
+};
 
 int main() {
     Engine engine;
@@ -232,7 +307,9 @@ int main() {
     Controls controls = {
         radians(80.0), 0.1,
         0.0, 0.0,
-        3.0, 3.0,
+        1,
+        0.0, 0.0,
+        1.0, 1.0,
         2.0, 30.0
     };
 
@@ -244,63 +321,8 @@ int main() {
         PERSPECTIVE_TYPE
     };
 
-    // A crystal
-    Object crystal = { {
-            // Lower faces
-            {{-0.5, -0.5, 0.0}, {-0.5,  0.5, 0.0}, { 0.0, 0.0, -1.5}},
-            {{-0.5,  0.5, 0.0}, { 0.5,  0.5, 0.0}, { 0.0, 0.0, -1.5}},
-            {{ 0.5,  0.5, 0.0}, { 0.5, -0.5, 0.0}, { 0.0, 0.0, -1.5}},
-            {{ 0.5, -0.5, 0.0}, {-0.5, -0.5, 0.0}, { 0.0, 0.0, -1.5}},
-
-            // Upper faces
-            {{ 0.0, 0.0,  1.5}, {-0.5,  0.5, 0.0}, {-0.5, -0.5, 0.0}},
-            {{ 0.0, 0.0,  1.5}, { 0.5,  0.5, 0.0}, {-0.5,  0.5, 0.0}},
-            {{ 0.0, 0.0,  1.5}, { 0.5, -0.5, 0.0}, { 0.5,  0.5, 0.0}},
-            {{ 0.0, 0.0,  1.5}, {-0.5, -0.5, 0.0}, { 0.5, -0.5, 0.0}},
-        },
-        {0.6, 0.84, 0.8},
-    };
-
-    // A sphere
-    int segments = 8;
-    double invSegs = 1.0/((double)segments);
-    int quadsPerSide = segments * segments;
-    int sphereQuadsCount = 12 * quadsPerSide;
-    vector<Triangle> sphereTris(sphereQuadsCount);
-    for (int i = 0; i < quadsPerSide; i++) {
-        int x = i % segments;
-        int y = i * invSegs;
-
-        double posX = 2.0*(double)x * invSegs - 1.0;
-        double posY = 2.0*(double)y * invSegs - 1.0;
-        double posX1 = posX + 2.0*invSegs;
-        double posY1 = posY + 2.0*invSegs;
-
-        int t = i * 12;
-        sphereTris[t + 0] = {normalize(dvec3(posX, -1, posY)), normalize(dvec3(posX1, -1, posY)), normalize(dvec3(posX1, -1, posY1))};
-        sphereTris[t + 1] = {normalize(dvec3(posX, -1, posY)), normalize(dvec3(posX1, -1, posY1)), normalize(dvec3(posX, -1, posY1))};
-        sphereTris[t + 2] = {normalize(dvec3(posX, 1, posY)), normalize(dvec3(posX, 1, posY1)), normalize(dvec3(posX1, 1, posY1))};
-        sphereTris[t + 3] = {normalize(dvec3(posX, 1, posY)), normalize(dvec3(posX1, 1, posY1)), normalize(dvec3(posX1, 1, posY))};
-        sphereTris[t + 4] = {normalize(dvec3(posX, posY, -1)), normalize(dvec3(posX, posY1, -1)), normalize(dvec3(posX1, posY1, -1))};
-        sphereTris[t + 5] = {normalize(dvec3(posX, posY, -1)), normalize(dvec3(posX1, posY1, -1)), normalize(dvec3(posX1, posY, -1))};
-        sphereTris[t + 6] = {normalize(dvec3(posX, posY, 1)), normalize(dvec3(posX1, posY, 1)), normalize(dvec3(posX1, posY1, 1))};
-        sphereTris[t + 7] = {normalize(dvec3(posX, posY, 1)), normalize(dvec3(posX1, posY1, 1)), normalize(dvec3(posX, posY1, 1))};
-        sphereTris[t + 8] = {normalize(dvec3(-1, posX, posY)), normalize(dvec3(-1, posX, posY1)), normalize(dvec3(-1, posX1, posY1))};
-        sphereTris[t + 9] = {normalize(dvec3(-1, posX, posY)), normalize(dvec3(-1, posX1, posY1)), normalize(dvec3(-1, posX1, posY))};
-        sphereTris[t + 10] = {normalize(dvec3(1, posX, posY)), normalize(dvec3(1, posX1, posY)), normalize(dvec3(1, posX1, posY1))};
-        sphereTris[t + 11] = {normalize(dvec3(1, posX, posY)), normalize(dvec3(1, posX1, posY1)), normalize(dvec3(1, posX, posY1))};
-    }
-
-    Object sphere = {
-        sphereTris,
-        {0.6, 0.84, 0.8}
-    };
-
     // Objects
-    vector<Object> objects = {
-        // crystal,
-        sphere
-    };
+    vector<Object> objects = loadObj("./objects/Wolf_obj.obj");
 
     int ticks = 0, tps = 0;
     double tpsTimer = 0.0, renderTimer = 0.0;
@@ -342,8 +364,6 @@ int main() {
 
             // Rendering
             for (Object obj : objects) {
-                // Spin, because we can.
-                obj.spin(currentT);
                 obj.draw(camera, lightN);
             }
 

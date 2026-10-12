@@ -15,8 +15,17 @@ find_package(glm REQUIRED)
 
 include(FetchContent)
 set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
-FetchContent_Declare( imgui GIT_REPOSITORY https://github.com/ocornut/imgui.git GIT_TAG v1.91.9b GIT_SHALLOW TRUE )
-FetchContent_MakeAvailable(imgui)
+FetchContent_Declare(imgui GIT_REPOSITORY https://github.com/ocornut/imgui.git GIT_TAG v1.91.9b GIT_SHALLOW TRUE)
+FetchContent_Declare(tinyobjloader GIT_REPOSITORY https://github.com/tinyobjloader/tinyobjloader.git GIT_TAG release GIT_SHALLOW TRUE)
+FetchContent_GetProperties(imgui)
+if(NOT imgui_POPULATED)
+  FetchContent_Populate(imgui)
+endif()
+FetchContent_GetProperties(tinyobjloader)
+if(NOT tinyobjloader_POPULATED)
+  FetchContent_Populate(tinyobjloader)
+endif()
+
 add_executable(${PROJECT_NAME}
   main.cpp
   ${imgui_SOURCE_DIR}/imgui.cpp
@@ -24,7 +33,7 @@ add_executable(${PROJECT_NAME}
   ${imgui_SOURCE_DIR}/imgui_tables.cpp
   ${imgui_SOURCE_DIR}/imgui_widgets.cpp
   ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
-  ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp 
+  ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
 )
-target_include_directories(${PROJECT_NAME} PRIVATE ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends )
-target_link_libraries(${PROJECT_NAME} PRIVATE glfw OpenGL::GL glm::glm )
+target_include_directories(${PROJECT_NAME} PRIVATE ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends ${tinyobjloader_SOURCE_DIR})
+target_link_libraries(${PROJECT_NAME} PRIVATE glfw OpenGL::GL glm::glm)
